@@ -45,3 +45,7 @@ def get_merged_data(ticker, start='2021-01-01', end='2026-01-01'):
     merged['Excess_Returns_SPY'] = merged['Log_Returns_SPY'] - merged['10yr_daily']
 
     return merged.dropna()
+
+def get_risk_free_rate(start='2021-01-01', end='2026-01-01'):
+    treasury = get_fred_data('DGS10', start, end)
+    return treasury.iloc[-1] / 100  # most recent value, converted to decimal
