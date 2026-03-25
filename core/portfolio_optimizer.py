@@ -237,9 +237,4 @@ def plot_bootstrap(bootstrap_returns, bootstrap_vols, risk_free_rate):
     plt.title('Bootstrapped Efficient Frontier with Sharpe Ratios')
     plt.grid()
     plt.show()
-
-
-
-
     
-
