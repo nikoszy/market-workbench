@@ -1,16 +1,24 @@
-import os
+'''Discounted Cash Flow (DCF) model, values a company based on it's projected 
+free cash flows discounted back to present value using a calculated WACC.
+Runs 10,000 Monte Carlo simulations with bounded distributions.
+Uses analyst consensus growth estimates when available, and it falls back to historical growth rates if not.
+'''
+
 import pandas as pd
 import numpy as np
 import scipy.stats as stats
 import matplotlib.pyplot as plt
 import seaborn as sns
 import yfinance as yf
-
-os.chdir(os.path.expanduser('~/market-workbench'))
-from core.data_fetcher import get_risk_free_rate
+from .data_fetcher import get_risk_free_rate
 
 
 def get_financials(ticker_symbol):
+    '''Fetches financial statements and key metrics for a given ticker using yfinance.
+    
+    Returns:
+        dict with revenue, free cash flow, operating margin, balance sheet, financials, and info.
+    '''
     t = yf.Ticker(ticker_symbol)
     financials = t.financials
     balance_sheet = t.balance_sheet
@@ -30,8 +38,74 @@ def get_financials(ticker_symbol):
         'info': t.info
     }
 
+def get_growth_estimates(ticker_symbol):
+    '''Get growth estimates from Yahoo Finance analyst consensus. 
+    Historical growth rates as fallback if estimates are not available.
+    
+    Returns:
+        dict with historical growth, analyst growth/None, and growth source.
+    '''
+
+    t=yf.Ticker(ticker_symbol)
+    historical_revenue = t.financials.loc['Total Revenue'].pct_change(-1, fill_method=None).dropna().mean()
+    
+    try:
+        estimates = t.growth_estimates
+        if estimates is not None and not estimates.empty:
+            analyst_growth = estimates.loc['growth'].iloc[0]
+            return {
+                'historical_growth': historical_revenue,
+                'analyst_growth': analyst_growth,
+                'growth_source': 'Analyst Estimates'
+            }
+    except Exception as e:
+        pass
+    return {
+        'historical_growth': historical_revenue,
+        'analyst_growth': None,
+        'growth_source': 'Historical Growth'
+    }
+
+def project_growth_rates(current_growth, terminal_growth, years):
+    '''Growth rate decays from current to terminal linearly over projection period.
+    
+    Prevents unrealistic compounding of high growth rates over long periods.
+
+    '''
+    return [current_growth + (terminal_growth - current_growth) * (i / years) for i in range(1, years + 1)]
+
+def discount_fcfs(revenue_base, growth_rates, fcf_margin, wacc, terminal_growth):
+    '''Calculate discounted free cash flows for each projection year and terminal value.
+    
+    Returns:
+        dict with discounted_fcfs list and discounted_terminal value.
+    '''
+    years = len(growth_rates)
+    discounted_fcfs = []
+
+    current_revenue = revenue_base 
+    for i, j in enumerate(growth_rates):
+        current_revenue *= (1 + j)
+        projected_fcf = current_revenue * fcf_margin
+        discounted_fcf = projected_fcf / (1 + wacc) ** (i + 1)
+        discounted_fcfs.append(discounted_fcf)
+    final_year_fcf = current_revenue * fcf_margin
+    terminal_value = (final_year_fcf * (1 + terminal_growth)) / (wacc - terminal_growth)
+    discounted_terminal = terminal_value / (1 + wacc) ** years
+    return {
+        'discounted_fcfs': discounted_fcfs,
+        'terminal_value': terminal_value,
+        'discounted_terminal': discounted_terminal,
+        'intrinsic_value': sum(discounted_fcfs) + discounted_terminal
+    }
 
 def calculate_wacc(financials_dict):
+    '''Calculated Weighted Average Cost of Capital (WACC)
+    
+    Uses the Capital Asset Pricing Model (CAPM) for cost of equity,
+    and interest expense/total debt for cost of debt.
+    Falls back to risk-free rate + 1% if interest expense data is unavailable.
+    '''
     rfr = get_risk_free_rate()
     balance_sheet = financials_dict['balance_sheet']
     financials = financials_dict['financials']
@@ -64,58 +138,66 @@ def calculate_wacc(financials_dict):
 
 
 def run_dcf(ticker_symbol, projection_years=5, terminal_growth=0.025):
+    '''Runs deterministic DCF valuation for a given ticker,
+    using growth decay to prevent unrealistic compounding growth.
+
+    Returns:
+        dict with implied price, WACC, revenue growth, 
+        FCF margin, current price, and shares outstanding.
+    '''
+
     fin = get_financials(ticker_symbol)
     wacc = calculate_wacc(fin)
+    growth = get_growth_estimates(ticker_symbol)
 
     revenue = fin['revenue']
     fcf = fin['fcf']
     shares_outstanding = fin['info']['sharesOutstanding']
+    current_price = fin['info']['currentPrice']
 
-    revenue_growth = revenue.pct_change(-1, fill_method=None).dropna().mean()
+    base_growth = growth['analyst_growth'] if growth['analyst_growth'] is not None else growth['historical_growth']
     fcf_margin_mean = (fcf / revenue).dropna().mean()
 
-    discounted_fcfs = []
-    for i in range(projection_years):
-        projected_revenue = revenue.iloc[0] * (1 + revenue_growth) ** (i + 1)
-        projected_fcf = projected_revenue * fcf_margin_mean
-        discounted_fcf = projected_fcf / (1 + wacc) ** (i + 1)
-        discounted_fcfs.append(discounted_fcf)
-
-    final_year_fcf = revenue.iloc[0] * (1 + revenue_growth) ** projection_years * fcf_margin_mean
-    terminal_value = (final_year_fcf * (1 + terminal_growth)) / (wacc - terminal_growth)
-    discounted_terminal = terminal_value / (1 + wacc) ** projection_years
-
-    intrinsic_value = sum(discounted_fcfs) + discounted_terminal
-    implied_price = intrinsic_value / shares_outstanding
+    growth_rates = project_growth_rates(base_growth, terminal_growth, projection_years)
+    result = discount_fcfs(revenue.iloc[0], growth_rates, fcf_margin_mean, wacc, terminal_growth)
+    implied_price = result['intrinsic_value'] / shares_outstanding
 
     return {
         'implied_price': implied_price,
+        'current_price': current_price,
         'wacc': wacc,
-        'revenue_growth': revenue_growth,
+        'upside_pct': (implied_price - current_price) / current_price * 100,
+        'growth_source': growth['growth_source'],\
+        'growth_rates': growth_rates,
         'fcf_margin': fcf_margin_mean,
-        'current_price': fin['info']['currentPrice'],
         'shares_outstanding': shares_outstanding
     }
 
 
 def run_dcf_monte_carlo(ticker_symbol, num_simulations=10000, projection_years=5, terminal_growth=0.025):
+    '''Run Monte Carlo DCF with 10,000 simulations.
+    
+    Vary revenue growth (truncated normal) and WACC (triangular distribution).
+    Growth decays from current to terminal linearly to prevent unrealistic compounding.\
+    
+    Returns:
+        dict with array of simulated prices, summary statistics,
+        and percentage of simulations above current price.
+    '''
     fin = get_financials(ticker_symbol)
     wacc = calculate_wacc(fin)
 
     revenue = fin['revenue']
     fcf = fin['fcf']
     shares_outstanding = fin['info']['sharesOutstanding']
+    current_price = fin['info']['currentPrice']
 
     # Full series for distribution parameters
     revenue_growth_series = revenue.pct_change(-1, fill_method=None).dropna()
-    operating_margin_series = fin['operating_margin'].dropna()
     fcf_margin_mean = (fcf / revenue).dropna().mean()
 
     rg_mean = revenue_growth_series.mean()
     rg_std = revenue_growth_series.std()
-    om_mean = operating_margin_series.mean()
-    om_std = operating_margin_series.std()
-    om_var = operating_margin_series.var()
 
     # Truncated normal for revenue growth (bounded: -10% to +15%)
     revenue_growth_dist = stats.truncnorm(
@@ -125,45 +207,71 @@ def run_dcf_monte_carlo(ticker_symbol, num_simulations=10000, projection_years=5
         scale=rg_std
     )
 
-    # Beta distribution for operating margin
-    alpha_param = (om_mean * (1 - om_mean)) / om_var - 1
-    a = alpha_param * om_mean
-    b = alpha_param * (1 - om_mean)
-    operating_margin_dist = stats.beta(a, b)
-
     # Triangular distribution for WACC
-    wacc_low = wacc - 0.02
-    wacc_high = wacc + 0.02
-    wacc_dist = stats.triang(c=0.5, loc=wacc_low, scale=wacc_high - wacc_low)
+    wacc_dist = stats.triang(c=0.5, loc=wacc - 0.02, scale=0.04)
 
     simulated_prices = []
+
+    fcf_margin_series = (fcf / revenue).dropna()
+    fcf_margin_mean = fcf_margin_series.mean()
+    fcf_std = fcf_margin_series.std()
+    
+    # Beta distribution for FCF margin (bounded between 0 and 1)
+    fm_alpha = (fcf_margin_mean * (1 - fcf_margin_mean)) / fcf_std**2 - 1
+    fm_a = fcf_margin_mean * fm_alpha
+    fm_b = (1 - fcf_margin_mean) * fm_alpha
+    fcf_margin_dist = stats.beta(fm_a, fm_b)
 
     for _ in range(num_simulations):
         sim_rg = revenue_growth_dist.rvs()
         sim_wacc = wacc_dist.rvs()
+        sim_fcf_margin = fcf_margin_dist.rvs()
 
         if sim_wacc <= terminal_growth:
             continue
 
-        sim_discounted_fcfs = []
-        for i in range(projection_years):
-            projected_revenue = revenue.iloc[0] * (1 + sim_rg) ** (i + 1)
-            projected_fcf = projected_revenue * fcf_margin_mean
-            discounted_fcf = projected_fcf / (1 + sim_wacc) ** (i + 1)
-            sim_discounted_fcfs.append(discounted_fcf)
+        growth_rates = project_growth_rates(sim_rg, terminal_growth, projection_years)
+        result = discount_fcfs(revenue.iloc[0], growth_rates, sim_fcf_margin, sim_wacc, terminal_growth)
+        simulated_price = result['intrinsic_value'] / shares_outstanding
+        simulated_prices.append(simulated_price)
 
-        final_fcf = revenue.iloc[0] * (1 + sim_rg) ** projection_years * fcf_margin_mean
-        sim_terminal = (final_fcf * (1 + terminal_growth)) / (sim_wacc - terminal_growth)
-        discounted_terminal = sim_terminal / (1 + sim_wacc) ** projection_years
+    prices = np.array(simulated_prices)
 
-        sim_value = sum(sim_discounted_fcfs) + discounted_terminal
-        sim_price = sim_value / shares_outstanding
-        simulated_prices.append(sim_price)
+    return {
+        'prices': prices,
+        'mean_price': np.mean(prices),
+        'median_price': np.median(prices),
+        'ci_5': np.percentile(prices, 5),
+        'ci_95': np.percentile(prices, 95),
+        'current_price': current_price,
+        'pct_undervalued': np.mean(prices > current_price) * 100
+    }
 
-    return np.array(simulated_prices)
-
+def get_dcf_summary(ticker_symbol):
+    '''Run full DCF analysis and return summary to be used in analysis page.
+    
+    Combines deterministic DCF, Monte Carlo results, and
+    growth estimates for comprehensive overview of valuation.
+    '''
+    dcf = run_dcf(ticker_symbol)
+    mc = run_dcf_monte_carlo(ticker_symbol)
+    return {
+        'implied_price': dcf['implied_price'],
+        'current_price': dcf['current_price'],
+        'upside_pct': dcf['upside_pct'],
+        'wacc': dcf['wacc'],
+        'growth_rates': dcf['growth_rates'],
+        'growth_source': dcf['growth_source'],
+        'fcf_margin': dcf['fcf_margin'],
+        'mc_mean': mc['mean_price'],
+        'mc_median': mc['median_price'],
+        'mc_ci_5': mc['ci_5'],
+        'mc_ci_95': mc['ci_95'],    
+        'mc_pct_undervalued': mc['pct_undervalued']
+    }
 
 def plot_monte_carlo_distribution(simulated_prices, current_price):
+    '''Plots histogram of Monte Carlo simulated prices with current price overlay.'''
     plt.figure(figsize=(10, 6))
     plt.hist(simulated_prices, bins=50, alpha=0.7, color='blue')
     plt.axvline(current_price, color='red', linestyle='dashed', linewidth=2, label=f'Current Price: ${current_price:.2f}')
@@ -175,6 +283,12 @@ def plot_monte_carlo_distribution(simulated_prices, current_price):
 
 
 def plot_dcf_sensitivity(ticker_symbol, projection_years=5, terminal_growth=0.025):
+    '''Plots sensitivty heatmap of implied price vs growth and WACC.
+
+    Args:
+        fin: financials dict from get_financials()
+        wacc: calculated WACC for the company
+    '''
     fin = get_financials(ticker_symbol)
     wacc = calculate_wacc(fin)
 
@@ -191,20 +305,11 @@ def plot_dcf_sensitivity(ticker_symbol, projection_years=5, terminal_growth=0.02
         for w in wacc_range:
             if w <= terminal_growth:
                 continue
-            discounted_fcfs = []
-            for i in range(projection_years):
-                projected_revenue = revenue.iloc[0] * (1 + rg) ** (i + 1)
-                projected_fcf = projected_revenue * fcf_margin_mean
-                discounted_fcf = projected_fcf / (1 + w) ** (i + 1)
-                discounted_fcfs.append(discounted_fcf)
-
-            final_fcf = revenue.iloc[0] * (1 + rg) ** projection_years * fcf_margin_mean
-            terminal_value = (final_fcf * (1 + terminal_growth)) / (w - terminal_growth)
-            discounted_terminal = terminal_value / (1 + w) ** projection_years
-            intrinsic_value = sum(discounted_fcfs) + discounted_terminal
-            implied_price = intrinsic_value / shares_outstanding
+            growth_rates = project_growth_rates(rg, terminal_growth, projection_years)
+            result = discount_fcfs(revenue.iloc[0], growth_rates, fcf_margin_mean, w, terminal_growth)
+            implied_price = result['intrinsic_value'] / shares_outstanding
             heatmap_data.append({'Revenue Growth': round(rg, 4), 'WACC': round(w, 4), 'Implied Price': implied_price})
-
+        
     heatmap_df = pd.DataFrame(heatmap_data)
     heatmap_pivot = heatmap_df.pivot(index='Revenue Growth', columns='WACC', values='Implied Price')
 
@@ -215,43 +320,40 @@ def plot_dcf_sensitivity(ticker_symbol, projection_years=5, terminal_growth=0.02
 
 
 def plot_scenario_comparison(ticker_symbol, projection_years=5, terminal_growth=0.025):
+    '''Plot bull vs. base vs. bear scenario comparsion against current price.
+    
+    Bull: analyst growth (or historical + 5%)
+    Base: blended growth with decay
+    Bear: negative growth and higher WACC
+    '''
     fin = get_financials(ticker_symbol)
     wacc = calculate_wacc(fin)
+    growth = get_growth_estimates(ticker_symbol)
 
     revenue = fin['revenue']
     fcf = fin['fcf']
     shares_outstanding = fin['info']['sharesOutstanding']
     current_price = fin['info']['currentPrice']
     fcf_margin_mean = (fcf / revenue).dropna().mean()
-    revenue_growth_mean = revenue.pct_change(-1, fill_method=None).dropna().mean()
+
+    bull_growth = growth['analyst_growth'] if growth['analyst_growth'] is not None else growth['historical_growth'] + 0.05
+    base_growth = growth['analyst_growth'] if growth['analyst_growth'] is not None else growth['historical_growth']
+    bear_growth = min(growth['historical_growth'] - 0.03, -0.02)
 
     scenarios = {
-        'Bull Case': {'growth': 0.10, 'wacc': wacc - 0.01},
-        'Base Case': {'growth': revenue_growth_mean, 'wacc': wacc},
-        'Bear Case': {'growth': -0.05, 'wacc': wacc + 0.01}
+        'Bull': {'growth': bull_growth, 'wacc': wacc - 0.01},
+        'Base': {'growth': base_growth, 'wacc': wacc},
+        'Bear': {'growth': bear_growth, 'wacc': wacc + 0.01}
     }
 
     scenario_prices = {}
     for name, params in scenarios.items():
-        rg = params['growth']
-        w = params['wacc']
-
-        if w <= terminal_growth:
-            scenario_prices[name] = np.nan
+        if params['wacc'] <= terminal_growth:
+            scenario_prices[name] = None
             continue
-
-        discounted_fcfs = []
-        for i in range(projection_years):
-            projected_revenue = revenue.iloc[0] * (1 + rg) ** (i + 1)
-            projected_fcf = projected_revenue * fcf_margin_mean
-            discounted_fcf = projected_fcf / (1 + w) ** (i + 1)
-            discounted_fcfs.append(discounted_fcf)
-
-        final_fcf = revenue.iloc[0] * (1 + rg) ** projection_years * fcf_margin_mean
-        terminal_value = (final_fcf * (1 + terminal_growth)) / (w - terminal_growth)
-        discounted_terminal = terminal_value / (1 + w) ** projection_years
-        intrinsic_value = sum(discounted_fcfs) + discounted_terminal
-        scenario_prices[name] = intrinsic_value / shares_outstanding
+        growth_rates = project_growth_rates(params['growth'], terminal_growth, projection_years)
+        result = discount_fcfs(revenue.iloc[0], growth_rates, fcf_margin_mean, params['wacc'], terminal_growth)
+        scenario_prices[name] = result['intrinsic_value'] / shares_outstanding
 
     scenario_df = pd.DataFrame(list(scenario_prices.items()), columns=['Scenario', 'Implied Price'])
 
