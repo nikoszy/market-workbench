@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+matplotlib
+yfinance
+scikit-learn
+scipy
+statsmodels
+python-dotenv
+urllib3
