@@ -1,5 +1,5 @@
 
-[streamlit-app-2026-03-31-10-42-01 (1).webm](https://github.com/user-attachments/assets/6af5d99e-289e-44da-8484-5f232ce9f1f8)
+[streamlit-app-2026-03-31-10-44-32 (1).webm](https://github.com/user-attachments/assets/44d58a29-9b32-4cf3-9ee8-b495a5fb9bb1)
 
 Financial Indicator & Macro-Informed Portfolio Analysis
 A Research Project by Nikolai Szymkiewicz
