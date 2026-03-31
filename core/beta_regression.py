@@ -18,9 +18,6 @@ def run_adf(df):
     '''Runs Augmented Dicky-Fuller tests on excess returns to
     determine whether the series is stationary.
     
-    H0: The series has a unit root (non-stationary)
-    H1: The series is stationary
-
     Returns:
         dict with ADF statistic, p-value, critical values, 
         and pass/fail for both stock and SPY excess returns.
@@ -28,25 +25,13 @@ def run_adf(df):
     stock_adf = ts.adfuller(df['Excess_Returns'].dropna())
     spy_adf = ts.adfuller(df['Excess_Returns_SPY'].dropna())
     return {
-        'Stock': {
-            'ADF Statistic': stock_adf[0],
-            'p-value': stock_adf[1],
-            'Critical Values': stock_adf[4],
-            'Stationary': stock_adf[1] < 0.05
-        },
-        'SPY': {
-            'ADF Statistic': spy_adf[0],
-            'p-value': spy_adf[1],
-            'Critical Values': spy_adf[4],
-            'Stationary': spy_adf[1] < 0.05
-        }
+        'Stock': {'ADF Statistic': stock_adf[0], 'p_value': stock_adf[1], 'Critical Values': stock_adf[4], 'Stationary': stock_adf[1] < 0.05},
+        'SPY': {'ADF Statistic': spy_adf[0], 'p_value': spy_adf[1], 'Critical Values': spy_adf[4], 'Stationary': spy_adf[1] < 0.05}
     }
 
 def run_beta_regression(df):
     '''Run OLS beta regression with and without Newey-West SE.
-    
     Regresses stock excess returns on SPY excess returns
-    Returns both standard OLS and HAC-corrected results for comparison.
 
     Returns:
         tuple of (model, model_nw) - base OLS and Newey-West corrected results.
@@ -73,7 +58,7 @@ def get_regression_summary(df):
         'Alpha': model.params['const'],
         'r_squared': model.rsquared,
         'beta_se_ols': model.bse['Excess_Returns_SPY'],
-        'beta_se_nw': model_nw.bse['Excess_Returns_SPY'],
+        'beta_se_nw': model_nw.bse[1],
         'durbin_watson': sm.stats.stattools.durbin_watson(model.resid),
         'kurtosis': calc_kurtosis(model.resid, fisher=True),
         'breusch_pagan_stat': bp_stat,
@@ -84,17 +69,10 @@ def get_regression_summary(df):
     return summary
 
 def run_rolling_beta(df, window = 60):
-    '''Run rolling beta regression with Newey-West SE, over a speficied time window (60 days default).
-    
-    Args:
-        df (pd.DataFrame): The merged DataFrame with excess returns.
-        window (int): The rolling window size in days.
-
-    Returns:
-        pd.Series of rolling beta estimates, indexed by date.
+    '''Run rolling beta regression with Newey-West SE, over a time window of 60 days.
     '''
     rolling = RollingOLS(df['Excess_Returns'], sm.add_constant(df['Excess_Returns_SPY']), window=window)
-    results = rolling.fit(cov_type='HAC', maxlags=5)
+    results = rolling.fit(cov_type='HAC', cov_kwds={'maxlags': 5})
     results = results.params.rename(columns={'Excess_Returns_SPY': 'Beta'})
     return results['Beta'].dropna()
 

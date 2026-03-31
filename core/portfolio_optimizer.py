@@ -9,15 +9,8 @@ from .data_fetcher import get_stock_data, get_risk_free_rate
 
 
 def import_portfolio(tickers, start='2021-01-01', end=None):
-    '''Fetches historical close price data for a list of tickers, 
-    calculates log returns, and returns a DataFrame of log returns.
-
-    Args:
-        tickers (list): List of stock ticker symbols.
-        start (str): Start date for fetching data ('YYYY-MM-DD')
-        end (str): End date for fetching data ('YYYY-MM-DD')
-    Returns:
-        pd.DataFrame: A DataFrame containing log returns for each ticker, indexed by date.
+    '''Gets historical closing price data for a list of tickers, 
+    calculates log returns, and returns a DataFrame of log returns for a specific portfolio.
     '''
     if end is None:
         end = datetime.today().strftime('%Y-%m-%d')
@@ -27,7 +20,6 @@ def import_portfolio(tickers, start='2021-01-01', end=None):
     returns = np.log(data / data.shift(1)).dropna()
     return returns
 
-#Plot historical close prices for each ticker and log returns for each ticker 
 def plot_portfolio(returns):
     '''Plots historical close price index and log returns for a portfolio of stocks.
     '''
@@ -48,7 +40,6 @@ def plot_portfolio(returns):
     plt.tight_layout()
     return plt.gcf()
 
-#Compute correlation matrix of log returns and plot as heatmap
 
 def plot_correlation(returns):
     '''Plots the correlation matrix of log returns as a heatmap.
@@ -62,8 +53,6 @@ def plot_correlation(returns):
     plt.title('Correlation Matrix of Log Returns')
     plt.grid(False)
     return plt.gcf()
-
-#Compute covariance matrix of log returns and plot as heatmap
 
 def plot_covariance(returns):
     '''Plots the covariance matrix of log returns as a heatmap.
@@ -83,12 +72,6 @@ def plot_covariance(returns):
 def screen_stocks(log_returns, risk_free_rate):
     '''Screens stocks based on annualized return, volatility, Sharpe ratio, and max drawdown.
     Flags stocks with negative Sharpe, severe drawdown (>40%), or high volatility (>1.5x mean).
-
-    Args:
-        log_returns (pd.DataFrame): DataFrame of log returns for each stock.
-        risk_free_rate (float): Daily risk-free rate (in decimal form).
-    Returns:
-        pd.DataFrame: A DataFrame summarizing the screening metrics and flags for each stock.
     '''
     annualized_returns = log_returns.mean() * 252
     annualized_volatility = log_returns.std() * np.sqrt(252)
@@ -110,14 +93,18 @@ def screen_stocks(log_returns, risk_free_rate):
 
     screened['Flag'] = 'Pass'
     screened.loc[screened['Sharpe Ratio'] < 0, 'Flag'] = 'Negative Sharpe'
-    screened.loc[screened['Max Drawdown'] < -0.40, 'Flag'] = 'Severe drawdown'
+    median_dd = screened['Max Drawdown'].median()
+    screened.loc[screened['Max Drawdown'] < median_dd * 1.5, 'Flag'] = 'Severe drawdown'
     screened.loc[screened['Annualized Volatility'] > annualized_volatility.mean() * 1.5, 'Flag'] = 'High volatility'
+    
     return screened
 
 #Build the mean-variance optimizer using the screened stocks and return the optimized portfolio log returns
 
 def optimize_portfolio(log_returns, risk_free_rate, profile = 'Balanced'):
-    '''Optimizes a portfolio using mean-variance optimization based on the Sharpe ratio, with constraints on asset weights according to the specified risk profile.
+    '''
+    Optimizes a portfolio using mean-variance optimization based on the Sharpe ratio,
+    with 3 portfolio profiles with their own default optimized weight allocations.
 
     Args:
         log_returns (pd.DataFrame): DataFrame of log returns for the selected stocks.
@@ -146,7 +133,7 @@ def optimize_portfolio(log_returns, risk_free_rate, profile = 'Balanced'):
     initial_guess = np.array(num_assets * [1. / num_assets])
     result = minimize(negative_sharpe, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints)
     optimized_weights = result.x
-    optimized_portfolio_return = np.dot(log_returns, optimized_weights)
+    optimized_portfolio_return = log_returns.dot(optimized_weights)    
     sharpe = -result.fun
     return optimized_portfolio_return, sharpe, optimized_weights
 
@@ -165,12 +152,6 @@ def plot_optimized_portfolio(log_returns, optimized_returns):
     plt.legend()
     plt.grid()
     return plt.gcf()
-
-#Train/test split:
-#Optimize on 2019–2023 data
-#Evaluate on 2024–2025 holdout
-#Report in-sample vs out-of-sample Sharpe ratio
-#RED FLAG CHECK: if backtest Sharpe > 2.0, it's overfit. Document this.
 
 def backtest_portfolio(tickers, risk_free_rate, profile='Balanced'):
     '''Backtests the optimized portfolio by training on historical data from 2019-2023 and evaluating on a holdout set from 2024-2025.
@@ -206,14 +187,8 @@ def backtest_portfolio(tickers, risk_free_rate, profile='Balanced'):
 
 #Value at Risk:
 def parametric_var(weights, daily_mean, daily_cov, confidence_level=0.95):
-    '''Calculates the parametric Value at Risk (VaR) for a portfolio based on the mean and covariance of daily log returns, and a specified confidence level.
-    Args:
-        weights (np.array): Array of portfolio weights for each asset.
-        daily_mean (pd.Series): Series of mean daily log returns for each asset.
-        daily_cov (pd.DataFrame): Covariance matrix of daily log returns for the assets.
-        confidence_level (float): Confidence level for VaR calculation (default is 0.95).
-    Returns:
-        float: The calculated parametric VaR for the portfolio at the specified confidence level.
+    '''Calculates the parametric Value at Risk (VaR) for a portfolio based on the mean and 
+    covariance of daily log returns, and a specified confidence level.
     '''
     portfolio_mean = np.dot(weights, daily_mean)
     portfolio_vol = np.sqrt(np.dot(weights, np.dot(daily_cov, weights)))
@@ -221,13 +196,8 @@ def parametric_var(weights, daily_mean, daily_cov, confidence_level=0.95):
     return -(portfolio_mean + z_score * portfolio_vol)
 
 def historical_var(weights, returns, confidence_level=0.95):
-    '''Calculates the historical Value at Risk (VaR) for a portfolio based on the distribution of historical portfolio returns and a specified confidence level.
-    Args:
-        weights (np.array): Array of portfolio weights for each asset.
-        returns (pd.DataFrame): DataFrame of historical log returns for each asset.
-        confidence_level (float): Confidence level for VaR calculation (default is 0.95).
-    Returns:
-        float: The calculated historical VaR for the portfolio at the specified confidence level.
+    '''Calculates the historical Value at Risk (VaR) for a portfolio based on the distribution of
+    historical portfolio returns and a specified confidence level.
     '''
     portfolio_returns = returns.dot(weights)
     return -np.percentile(portfolio_returns, (1 - confidence_level) * 100)
@@ -278,7 +248,8 @@ def plot_var_comparison(log_returns, weights):
 #bootstrap the optimization to get confidence intervals on the optimized weights and returns
 
 def boot(returns, risk_free_rate, profile='Balanced', num_portfolios=1000):
-    '''Performs bootstrapping of the portfolio optimization process to generate a distribution of optimized weights, returns, and volatilities, allowing for confidence interval estimation of the optimized portfolio's performance under the specified risk profile.
+    '''Performs bootstrapping of the portfolio optimization process to generate a distribution of optimized weights,
+    returns, and volatilities, allowing us to estimate a confidence interval for the optimize portfolio. 
     Args:
         returns (pd.DataFrame): DataFrame of log returns for the selected stocks.
         risk_free_rate (float): Daily risk-free rate (in decimal form).
@@ -302,7 +273,7 @@ def boot(returns, risk_free_rate, profile='Balanced', num_portfolios=1000):
     constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
     
     def negative_sharpe(weights, mean_ret, cov):
-        '''Objective function to minimize (negative Sharpe ratio) for the portfolio optimization process, given the mean returns and covariance matrix of the assets.
+        '''Minimize negative Sharpe ratio for the portfolio optimization process, given the mean returns and covariance matrix of the assets.
         Args:
             weights (np.array): Array of portfolio weights for each asset.
             mean_ret (pd.Series): Series of mean annualized returns for each asset.
@@ -344,19 +315,9 @@ def plot_bootstrap(bootstrap_returns, bootstrap_vols, risk_free_rate):
     return plt.gcf()
 
 def get_portfolio_summary(log_returns, risk_free_rate, profile = 'Balanced'):
-    '''Summarizes the portfolio optimization process by screening stocks based on 
-    their log returns and risk metrics, optimizing the portfolio according to the 
-    specified risk profile, calculating Value at Risk (VaR) for the optimized portfolio, 
-    and returning a comprehensive summary of the screening results, optimized weights, 
+    '''Summarizes the portfolio optimization process by returning optimized weights, 
     Sharpe ratio, annualized return, annualized volatility, and VaR metrics for the 
-    selected stocks in the portfolio.
-
-    Args:
-        log_returns (pd.DataFrame): DataFrame of log returns for the selected stocks.
-        risk_free_rate (float): Daily risk-free rate (in decimal form).
-        profile (str): Risk profile for optimization ('Conservative', 'Balanced', 'Aggressive').
-    Returns:
-        dict: A dictionary containing the screening results, qualified tickers, optimized weights, Sharpe ratio, annualized return, annualized volatility, Value at Risk (VaR) metrics, and the risk profile used for the optimization.
+    selected stocks in the portfolio. 
     '''
     screening = screen_stocks(log_returns, risk_free_rate)
     selected = screening[screening['Flag'] == 'Pass'].index.tolist()

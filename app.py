@@ -1,158 +1,177 @@
+''' Market Intelligence Workbench: Research Project Edition '''
 import streamlit as st
 import pandas as pd
-from core.data_fetcher import get_merged_data, get_fred_data
-from core.beta_regression import run_beta_regression, run_rolling_beta, plot_residual_diagnostics, plot_quarterly_scatter, plot_realized_volatility
-from core.dcf_montecarlo import run_dcf, run_dcf_monte_carlo
-from core.portfolio_optimizer import import_portfolio, plot_portfolio, plot_correlation, plot_covariance, screen_stocks, optimize_portfolio, backtest_portfolio
-from core.macro_classifier import get_macro_data, engineer_features, prepare_training_data, train_macro_classifier, evaluate_model, get_feature_importance
+import numpy as np
+import matplotlib.pyplot as plt
 
-# Page configuration
-st.set_page_config(page_title="Market Workbench", layout="wide")
+st.set_page_config(page_title="Sophomore Year Spring Break Project", layout= "wide")
 
-# Sidebar navigation
-st.sidebar.title("Navigation")
-page = st.sidebar.radio("Select Analysis", [
-    "Beta Regression",
-    "DCF Valuation",
-    "Portfolio Optimizer",
-    "Macro Classifier"
-])
+# --- Research Project Header ---
+st.title("About the project...")
+st.write("""
+In one of my statistics classes I completed a project studying which financial indicators had the strongest association 
+with Quarterly Stock Returns and found that Beta had the most significant relationship. This helped me understand that
+volatility is an important factor in thr market, and I wanted to learn more.
 
-# ============================================================================
-# Beta Regression Page
-# ============================================================================
-if page == "Beta Regression":
-    st.title("📊 Beta Regression Analysis")
+I built this tool during my Sophomore year spring break to explore uses of statistical modeling, machine learning
+and financial theory hand in hand to come up with conclusions. My goal was to build something that I could actually use
+to give me actionable insight in my investments, and have a project that I can keep adding to as I develop my 
+machine learning and analysis skills more and more.
+""")
+
+st.header("What does it do?")
+st.write("""
+You enter a list of stock tickers, for example a portfolio of 10 different stocks. The system screens your stocks to determine
+if they might be risky by screening for high volatility, negative sharpe ratio, or a massive drop in value (>|-40%|). Using a
+Random Forest Classifier, classifies predicted Macroeconomic Regime over the next 6 months based on various macro indicators 
+such as 10 year treasury yield, 2 year treasury yield, and credit spread, which were found to be the most important non-related
+features. Then, using a mean-variance optimizer, runs a portfolio optimization using a risk-profile decided by the macro regime.
+Finally, runs a DCF simulation valuing each stock on it's free cash flow in terms of today's value.
+""")
+
+st.divider()
+
+# --- Input Section ---
+ticker = st.text_input("Enter all stock tickers, seperated by comma.", placeholder="e.g., AAPL, JPM, XOM, JNJ, AMZN, TLT")
+profile_override = st.selectbox("Risk Profile", ["Auto (Macro-Informed)", "Conservative", "Balanced", "Aggressive"])
+tickers = [t.strip().upper() for t in ticker.split(",") if t.strip()]
+
+if st.button("Run Analysis", type="primary"):
+    st.session_state['run_analysis'] = True
+
+if st.session_state.get('run_analysis', False) and len(tickers) >= 2:
     
-    col1, col2 = st.columns(2)
-    with col1:
-        ticker = st.text_input("Enter stock ticker:", "AAPL")
-    with col2:
-        benchmark = st.selectbox("Benchmark:", ["SPY", "QQQ", "IWM"])
+    # Step 1: Macro Regime Classifier
+    st.header("Macro Regime Classifier")
+    st.write("> **Methodology:** Random Forest model trained on CPI momentum, yield curve spread, and credit spread. Train/test split, model had 70% accuracy with AUC = 0.73 and 100% Contraction recall. This means when the model says contraction, you better listen.")
     
-    if st.button("Run Analysis"):
+    with st.spinner("Training macro regime classifying model..."):
         try:
-            with st.spinner("Fetching data..."):
-                df = get_merged_data(ticker)
-            
-            with st.spinner("Running regression..."):
-                model, model_nw = run_beta_regression(df)
-                rolling_beta = run_rolling_beta(df)
-            
-            st.subheader("Regression Summary")
-            st.text(model_nw.summary())
-            
+            from core.macro_classifier import get_classifier_summary, plot_feature_importance
+            macro = get_classifier_summary()
+            regime = macro['current_prediction']
+
+            if regime['regime'] == "Expansion":
+                st.success(f"**{regime['regime']}** — {regime['confidence']:.0%} confidence · As of {regime['as_of']}")
+            else:
+                st.error(f"**{regime['regime']}** — {regime['confidence']:.0%} confidence · As of {regime['as_of']}")
+
+            if profile_override == 'Auto (Macro-Informed)':
+                if regime['regime'] == 'Contraction':
+                    profile = 'Conservative'
+                elif regime['confidence'] > 0.7:
+                    profile = 'Aggressive'
+                else:
+                    profile = 'Balanced'
+                st.info(f"Our macro regime classifying model suggests a **{profile}** profile.")
+            else:
+                profile = profile_override
+
             col1, col2 = st.columns(2)
             with col1:
-                st.subheader("Residual Diagnostics")
-                st.pyplot(plot_residual_diagnostics(df))
-            
+                fig = plot_feature_importance(macro['model'], macro['macro_data'][['Yield Curve', 'CPI_6M_Change','Credit_Spread']].dropna())
+                st.pyplot(fig)
+                plt.close()
             with col2:
-                st.subheader("Realized Volatility")
-                st.pyplot(plot_realized_volatility(df))
-            
-            st.subheader("Quarterly Returns Scatter")
-            st.pyplot(plot_quarterly_scatter(df, rolling_beta))
-            
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
+                ev = macro['evaluation']
+                st.metric("Accuracy", f"{ev['accuracy']:.0%}")
+                st.metric("AUC", f"{ev['auc']:.2f}")
+                st.metric("Contraction Recall", f"{ev['contraction_recall']:.0%}")
 
-# ============================================================================
-# DCF Valuation Page
-# ============================================================================
-elif page == "DCF Valuation":
-    st.title("💰 DCF Monte Carlo Valuation")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        ticker = st.text_input("Enter stock ticker:", "AAPL")
-    with col2:
-        projection_years = st.slider("Projection years:", 1, 10, 5)
-    with col3:
-        num_simulations = st.slider("Simulations:", 1000, 50000, 10000)
-    
-    if st.button("Run Valuation"):
+        except Exception as e:
+            st.error(f"Macro classifier error: {e}")
+            profile = "Balanced"
+        
+    st.divider()
+
+    # Step 2: Screen Stocks
+    st.header("Stock Screening")
+    with st.spinner("Pulling price data and screening stocks..."):
         try:
-            with st.spinner("Running DCF analysis..."):
-                dcf_result = run_dcf(ticker, projection_years)
-            
-            st.subheader("DCF Results")
-            st.write(dcf_result)
-            
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
+            from core.portfolio_optimizer import import_portfolio, screen_stocks
+            from core.data_fetcher import get_risk_free_rate
 
-# ============================================================================
-# Portfolio Optimizer Page
-# ============================================================================
-elif page == "Portfolio Optimizer":
-    st.title("🎯 Portfolio Optimizer")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        tickers_input = st.text_input("Enter tickers (comma-separated):", "AAPL,JPM,XOM,JNJ,AMZN,TLT")
-        tickers = [t.strip().upper() for t in tickers_input.split(",")]
-    with col2:
-        profile = st.selectbox("Risk Profile:", ["Conservative", "Balanced", "Aggressive"])
-    
-    if st.button("Optimize Portfolio"):
-        try:
-            with st.spinner("Fetching portfolio data..."):
-                returns = import_portfolio(tickers)
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("Price History")
-                st.pyplot(plot_portfolio(returns))
-                
-                st.subheader("Stock Screening")
-                screened = screen_stocks(returns, 0.04)
-                st.write(screened)
-            
-            with col2:
-                st.subheader("Correlation Matrix")
-                st.pyplot(plot_correlation(returns))
-                
-                st.subheader("Covariance Matrix")
-                st.pyplot(plot_covariance(returns))
-            
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
+            rfr = get_risk_free_rate()
+            returns = import_portfolio(tickers)
+            screening = screen_stocks(returns, rfr)
 
-# ============================================================================
-# Macro Classifier Page
-# ============================================================================
-elif page == "Macro Classifier":
-    st.title("🌍 Macro Economic Regime Classifier")
-    
-    st.markdown("""
-    This model predicts whether the market will be in an **Expansion** or **Contraction** 
-    regime over the next 3 months based on macroeconomic indicators.
+            st.dataframe(screening.style.format({
+                'Annualized Return': '{:.1%}',
+                'Annualized Volatility': '{:.1%}',
+                'Sharpe Ratio': '{:.2f}',
+                'Max Drawdown': '{:.1%}'
+            }), use_container_width=True)
+            
+            passed = screening[screening['Flag'] == 'Pass'].index.tolist()
+            flagged = screening[screening['Flag'] != 'Pass'].index.tolist()
+
+            if flagged:
+                st.warning(f"Flagged: {', '.join(flagged)}")
+                include_flagged = st.multiselect("Would you like to include flagged stocks anyway?", flagged)
+                qualified = passed + include_flagged
+            else:
+                st.success("All tickers passed screening.")
+                qualified = passed
+        except Exception as e:
+                st.error(f"Screening error: {e}")
+                qualified = tickers
+
+    st.divider()
+
+    # Step 3: Portfolio Optimizer
+    st.header("Portfolio Optimizer")
+    st.write("> **Methodology:** Mean-variance optimizer with 3 risk-profiles that have different weight constraints, bootstrapped efficient frontier with 1,000 resamples, computed parametric and historical VaR, detecting fat tails.")
+
+    if len(qualified) < 2:
+        st.error("We need at least 2 qualified stocks to optimize, please try again.")
+    else:
+        with st.spinner(f"Optimizing with a {profile} profile..."):
+            try:
+                from core.portfolio_optimizer import ( 
+                    optimize_portfolio, calculate_var, plot_optimized_portfolio, 
+                    plot_var_comparison, boot, plot_bootstrap
+                )
+
+                filtered = returns[qualified]
+                optimized_returns, sharpe, weights = optimize_portfolio(filtered, rfr, profile)
+                var_results = calculate_var(filtered, weights)
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Sharpe Ratio", f"{sharpe:.2f}")
+                c2.metric("Daily VaR (95%)", f"{var_results['Parametric VaR']:.2%}")
+
+                st.subheader("Allocation")
+                fig_cum = plot_optimized_portfolio(filtered, optimized_returns)
+                st.pyplot(fig_cum)
+                plt.close()
+
+                tab_risk, tab_boot = st.tabs(["Risk Analysis", "Bootstrapped Frontier"])
+                with tab_risk:
+                    fig_var = plot_var_comparison(filtered, weights)
+                    st.pyplot(fig_var)
+                    plt.close()
+                    
+                with tab_boot:
+                    bw, br, bv = boot(filtered, rfr, profile)
+                    fig_boot = plot_bootstrap(br, bv, rfr)
+                    st.pyplot(fig_boot)
+                    plt.close()
+
+            except Exception as e:
+                st.error(f"Optimization error: {e}")
+
+    st.divider()
+
+# --- Conclusion Section ---
+    st.header("What did I learn?")
+    st.info("""
+    Predicting the stock market is hard. Literally all of these variables only account for such a small amount of variability in returns
+    in the stock market, and just trying to use the free numbers that are available on the internet can only get you so far. I am excited 
+    to expand this project to explore more machine learning capabilities and expand the scope of predictors that the model captures to 
+    incude political influences, geopolitical events, news headlines, and other factors that economic indicators cannot capture.
     """)
     
-    if st.button("Train & Evaluate Model"):
-        try:
-            with st.spinner("Loading macro data..."):
-                macro = get_macro_data()
-                macro = engineer_features(macro)
-            
-            with st.spinner("Preparing training data..."):
-                features, target = prepare_training_data(macro)
-            
-            with st.spinner("Training model..."):
-                model, X_train, X_test, y_train, y_test = train_macro_classifier(features, target)
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("Model Evaluation")
-                evaluate_model(model, X_test, y_test)
-            
-            with col2:
-                st.subheader("Feature Importance")
-                importance = get_feature_importance(model, features)
-                st.dataframe(importance)
-            
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
+    st.caption("Market Intelligence Workbench · Sophomore Project · Data from yfinance & FRED")
+
+else:
+    st.info("Enter at least 2 stock tickers and click Run Analysis to get started.")

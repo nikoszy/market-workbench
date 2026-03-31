@@ -12,9 +12,55 @@ import seaborn as sns
 import yfinance as yf
 from .data_fetcher import get_risk_free_rate
 
+def weighted_mean(series):
+    '''Weigh recent years more heavily.'''
+    clean = series.dropna()
+    if len(clean) <= 1:
+        return float(clean.mean())
+    weights = np.arange(len(clean), 0, -1)
+    return float(np.average(clean, weights=weights))
+
+def get_fcf_components(ticker_symbol):
+    '''Get all components needed to build FCF 
+    FCF = NOPAT + D&A - Dapex - Change in Working Capital
+    NOPAT = Operating income * (1 - Tax Rate)
+
+    Returns:
+        dict with component ratios and raw values.
+    '''
+    t = yf.Ticker(ticker_symbol)
+    financials = t.financials
+    cashflow = t.cashflow
+
+    revenue = financials.loc['Total Revenue']
+    op_inc  = financials.loc['Operating Income']
+    tax_rate = financials.loc['Tax Rate For Calcs']
+    depreciation = cashflow.loc['Depreciation And Amortization']
+    capex = cashflow.loc['Capital Expenditure'].abs()
+    wc_change = cashflow.loc['Change In Working Capital']
+
+    op_marg = op_inc / revenue
+    da_ratio = depreciation / revenue
+    capex_ratio = capex / revenue
+    wc_ratio = wc_change / revenue
+
+    nopat = op_inc * (1 - tax_rate)
+    build_fcf = nopat + depreciation - capex - wc_change
+    build_fcf_margin = build_fcf / revenue
+
+    return {
+        'revenue': revenue,
+        'op_marg': weighted_mean(op_marg),
+        'tax_rate': weighted_mean(tax_rate),
+        'da_ratio': weighted_mean(da_ratio), 
+        'capex_ratio': weighted_mean(capex_ratio),
+        'wc_ratio': weighted_mean(wc_ratio),
+        'build_fcf_margin': weighted_mean(build_fcf_margin),
+        'raw_fcf_margin': weighted_mean(cashflow.loc['Free Cash Flow'] / revenue)
+        }
 
 def get_financials(ticker_symbol):
-    '''Fetches financial statements and key metrics for a given ticker using yfinance.
+    '''Get financial statements and key metrics for a given ticker.
     
     Returns:
         dict with revenue, free cash flow, operating margin, balance sheet, financials, and info.
@@ -39,8 +85,8 @@ def get_financials(ticker_symbol):
     }
 
 def get_growth_estimates(ticker_symbol):
-    '''Get growth estimates from Yahoo Finance analyst consensus. 
-    Historical growth rates as fallback if estimates are not available.
+    '''Get growth estimates from yfinance analyst consensus. 
+    Use historical growth rates as fallback if estimates are not available.
     
     Returns:
         dict with historical growth, analyst growth/None, and growth source.
@@ -48,31 +94,65 @@ def get_growth_estimates(ticker_symbol):
 
     t=yf.Ticker(ticker_symbol)
     historical_revenue = t.financials.loc['Total Revenue'].pct_change(-1, fill_method=None).dropna().mean()
-    
+    analyst_growth = None
+
     try:
         estimates = t.growth_estimates
         if estimates is not None and not estimates.empty:
-            analyst_growth = estimates.loc['growth'].iloc[0]
-            return {
-                'historical_growth': historical_revenue,
-                'analyst_growth': analyst_growth,
-                'growth_source': 'Analyst Estimates'
-            }
+            if '+1y' in estimates.index and not pd.isna(estimates.loc['+1y', 'stockTrend']):
+                analyst_growth = float(estimates.loc['+1y', 'stockTrend'])
+            elif '0y' in estimates.index and not pd.isna(estimates.loc['0y', 'stockTrend']):
+                analyst_growth = float(estimates.loc['0y', 'stockTrend'])
+            else:
+                analyst_growth = None
+
     except Exception as e:
         pass
     return {
         'historical_growth': historical_revenue,
-        'analyst_growth': None,
-        'growth_source': 'Historical Growth'
+        'analyst_growth': analyst_growth,
+        'growth_source': 'Analyst Estimates'
     }
 
 def project_growth_rates(current_growth, terminal_growth, years):
     '''Growth rate decays from current to terminal linearly over projection period.
-    
-    Prevents unrealistic compounding of high growth rates over long periods.
+    This helps to prevent unrealistic compounding of high growth rates over long periods.
 
     '''
     return [current_growth + (terminal_growth - current_growth) * (i / years) for i in range(1, years + 1)]
+
+def get_implied_growth_rate(ticker_symbol, terminal_growth = 0.025):
+    '''Due to DCF undervaluing many companies as a limitation, lets find,
+    what growth rate would justify current market price?
+    '''
+    from scipy.optimize import brentq
+    fin = get_financials(ticker_symbol)
+    wacc = calculate_wacc(fin)
+    components = get_fcf_components(ticker_symbol)
+    revenue = fin['revenue']
+    shares = fin['info']['sharesOutstanding']
+    current_price = fin['info']['currentPrice']
+    fcf_margin = components['build_fcf_margin']
+
+    def price_gap(growth):
+        rates = project_growth_rates(growth, terminal_growth, 5)
+        result = discount_fcfs(revenue.iloc[0], rates, fcf_margin, wacc, terminal_growth)
+        return (result['intrinsic_value'] / shares) - current_price
+    
+    try:
+        implied = brentq(price_gap, -0.2, 1.5)
+        return {
+            'implied_growth': implied,
+            'current_price': current_price,
+            'wacc': wacc,
+            'fcf_margin': fcf_margin,
+            'interpretation': f"Market is pricing in {implied:.1%} revenue growth to justify ${current_price:.2f}"
+        }
+    except:
+        return {
+            'implied_growth': None,
+            'interpretation': "Could not solve for implied growth rate"
+        }
 
 def discount_fcfs(revenue_base, growth_rates, fcf_margin, wacc, terminal_growth):
     '''Calculate discounted free cash flows for each projection year and terminal value.
@@ -100,11 +180,9 @@ def discount_fcfs(revenue_base, growth_rates, fcf_margin, wacc, terminal_growth)
     }
 
 def calculate_wacc(financials_dict):
-    '''Calculated Weighted Average Cost of Capital (WACC)
-    
-    Uses the Capital Asset Pricing Model (CAPM) for cost of equity,
-    and interest expense/total debt for cost of debt.
-    Falls back to risk-free rate + 1% if interest expense data is unavailable.
+    '''Calculates Weighted Average Cost of Capital (WACC), using the Capital Asset Pricing Model (CAPM) for cost of equity,
+    and interest expense and total debt to calculate the cost of debt. If interest expense data is unavailable, falls back
+    to risk-free rate + 1%.
     '''
     rfr = get_risk_free_rate()
     balance_sheet = financials_dict['balance_sheet']
@@ -138,9 +216,7 @@ def calculate_wacc(financials_dict):
 
 
 def run_dcf(ticker_symbol, projection_years=5, terminal_growth=0.025):
-    '''Runs deterministic DCF valuation for a given ticker,
-    using growth decay to prevent unrealistic compounding growth.
-
+    '''Runs deterministic DCF valuation for a given ticker.
     Returns:
         dict with implied price, WACC, revenue growth, 
         FCF margin, current price, and shares outstanding.
@@ -149,17 +225,17 @@ def run_dcf(ticker_symbol, projection_years=5, terminal_growth=0.025):
     fin = get_financials(ticker_symbol)
     wacc = calculate_wacc(fin)
     growth = get_growth_estimates(ticker_symbol)
+    components = get_fcf_components(ticker_symbol)
 
     revenue = fin['revenue']
-    fcf = fin['fcf']
     shares_outstanding = fin['info']['sharesOutstanding']
     current_price = fin['info']['currentPrice']
 
     base_growth = growth['analyst_growth'] if growth['analyst_growth'] is not None else growth['historical_growth']
-    fcf_margin_mean = (fcf / revenue).dropna().mean()
+    fcf_margin = components['build_fcf_margin']
 
     growth_rates = project_growth_rates(base_growth, terminal_growth, projection_years)
-    result = discount_fcfs(revenue.iloc[0], growth_rates, fcf_margin_mean, wacc, terminal_growth)
+    result = discount_fcfs(revenue.iloc[0], growth_rates, fcf_margin, wacc, terminal_growth)
     implied_price = result['intrinsic_value'] / shares_outstanding
 
     return {
@@ -169,17 +245,14 @@ def run_dcf(ticker_symbol, projection_years=5, terminal_growth=0.025):
         'upside_pct': (implied_price - current_price) / current_price * 100,
         'growth_source': growth['growth_source'],\
         'growth_rates': growth_rates,
-        'fcf_margin': fcf_margin_mean,
+        'fcf_margin': fcf_margin,
+        'fcf_components': components,
         'shares_outstanding': shares_outstanding
     }
 
 
 def run_dcf_monte_carlo(ticker_symbol, num_simulations=10000, projection_years=5, terminal_growth=0.025):
     '''Run Monte Carlo DCF with 10,000 simulations.
-    
-    Vary revenue growth (truncated normal) and WACC (triangular distribution).
-    Growth decays from current to terminal linearly to prevent unrealistic compounding.\
-    
     Returns:
         dict with array of simulated prices, summary statistics,
         and percentage of simulations above current price.
@@ -188,13 +261,14 @@ def run_dcf_monte_carlo(ticker_symbol, num_simulations=10000, projection_years=5
     wacc = calculate_wacc(fin)
 
     revenue = fin['revenue']
-    fcf = fin['fcf']
+    components = get_fcf_components(ticker_symbol)
+    fcf_margin_mean = components['build_fcf_margin']
     shares_outstanding = fin['info']['sharesOutstanding']
     current_price = fin['info']['currentPrice']
 
     # Full series for distribution parameters
     revenue_growth_series = revenue.pct_change(-1, fill_method=None).dropna()
-    fcf_margin_mean = (fcf / revenue).dropna().mean()
+    fcf_margin_mean = components['build_fcf_margin']
 
     rg_mean = revenue_growth_series.mean()
     rg_std = revenue_growth_series.std()
@@ -211,17 +285,23 @@ def run_dcf_monte_carlo(ticker_symbol, num_simulations=10000, projection_years=5
     wacc_dist = stats.triang(c=0.5, loc=wacc - 0.02, scale=0.04)
 
     simulated_prices = []
-
-    fcf_margin_series = (fcf / revenue).dropna()
-    fcf_margin_mean = fcf_margin_series.mean()
-    fcf_std = fcf_margin_series.std()
-    
     # Beta distribution for FCF margin (bounded between 0 and 1)
-    fm_alpha = (fcf_margin_mean * (1 - fcf_margin_mean)) / fcf_std**2 - 1
-    fm_a = fcf_margin_mean * fm_alpha
-    fm_b = (1 - fcf_margin_mean) * fm_alpha
+    
+    t_data = yf.Ticker(ticker_symbol)
+    rev = t_data.financials.loc['Total Revenue']
+    op_inc = t_data.financials.loc['Operating Income']
+    tax = t_data.financials.loc['Tax Rate For Calcs']
+    da = t_data.cashflow.loc['Depreciation And Amortization']
+    capex_abs = t_data.cashflow.loc['Capital Expenditure'].abs()
+    wc = t_data.cashflow.loc['Change In Working Capital']
+    build_margin_series = ((op_inc * (1 - tax) + da - capex_abs - wc) / rev).dropna()
+    
+    fm_mean = weighted_mean(build_margin_series)
+    fm_std = build_margin_series.std()
+    fm_alpha = (fm_mean * (1 - fm_mean)) / fm_std**2 - 1
+    fm_a = fm_mean * fm_alpha
+    fm_b = (1 - fm_mean) * fm_alpha
     fcf_margin_dist = stats.beta(fm_a, fm_b)
-
     for _ in range(num_simulations):
         sim_rg = revenue_growth_dist.rvs()
         sim_wacc = wacc_dist.rvs()
@@ -249,9 +329,8 @@ def run_dcf_monte_carlo(ticker_symbol, num_simulations=10000, projection_years=5
 
 def get_dcf_summary(ticker_symbol):
     '''Run full DCF analysis and return summary to be used in analysis page.
-    
-    Combines deterministic DCF, Monte Carlo results, and
-    growth estimates for comprehensive overview of valuation.
+    This combines all factors including DCF, monte carlo results, and growth 
+    estimates so that we can get a better understanding for analysis.
     '''
     dcf = run_dcf(ticker_symbol)
     mc = run_dcf_monte_carlo(ticker_symbol)
@@ -295,7 +374,8 @@ def plot_dcf_sensitivity(ticker_symbol, projection_years=5, terminal_growth=0.02
     revenue = fin['revenue']
     fcf = fin['fcf']
     shares_outstanding = fin['info']['sharesOutstanding']
-    fcf_margin_mean = (fcf / revenue).dropna().mean()
+    components = get_fcf_components(ticker_symbol)
+    fcf_margin_mean = components['build_fcf_margin']
 
     revenue_growth_range = np.linspace(-0.05, 0.10, 5)
     wacc_range = np.linspace(wacc - 0.02, wacc + 0.02, 5)
@@ -334,7 +414,8 @@ def plot_scenario_comparison(ticker_symbol, projection_years=5, terminal_growth=
     fcf = fin['fcf']
     shares_outstanding = fin['info']['sharesOutstanding']
     current_price = fin['info']['currentPrice']
-    fcf_margin_mean = (fcf / revenue).dropna().mean()
+    components = get_fcf_components(ticker_symbol)
+    fcf_margin_mean = components['build_fcf_margin']
 
     bull_growth = growth['analyst_growth'] if growth['analyst_growth'] is not None else growth['historical_growth'] + 0.05
     base_growth = growth['analyst_growth'] if growth['analyst_growth'] is not None else growth['historical_growth']

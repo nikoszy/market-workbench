@@ -11,17 +11,11 @@ from .data_fetcher import get_fred_data
 
 
 def get_macro_data(start='2010-01-01', end=None):
-    """Fetch and align all macro indicators at monthly frequency.
-    
-    Args:
-        start (str): Start date for fetching data ('YYYY-MM-DD')
-        end (str): End date for fetching data ('YYYY-MM-DD')
-    Returns:
-        pd.DataFrame: A DataFrame containing aligned macro indicators and SPY price.
+    """Get data for macro indicators and re-align so that they are all stored as monthly.
         """
-    credit_spread = get_fred_data('BAMLH0A0HYM2', start, end)
-    treasury_10yr = get_fred_data('DGS10', start, end)
-    treasury_2yr = get_fred_data('DGS2', start, end)
+    ba_spread = get_fred_data('BAMLH0A0HYM2', start, end)
+    dgs10 = get_fred_data('DGS10', start, end)
+    dgs2 = get_fred_data('DGS2', start, end)
     cpi = get_fred_data('CPIAUCSL', start, end)
     unemployment = get_fred_data('UNRATE', start, end)
     fed_funds = get_fred_data('FEDFUNDS', start, end)
@@ -31,13 +25,13 @@ def get_macro_data(start='2010-01-01', end=None):
     spy_series = spy.squeeze()
     
     macro = pd.DataFrame({
-        '10Y': treasury_10yr.resample('ME').last(),
-        '2Y': treasury_2yr.resample('ME').last(),
+        '10Y': dgs10.resample('ME').last(),
+        '2Y': dgs2.resample('ME').last(),
         'CPI': cpi.resample('ME').last(),
         'Unemployment': unemployment.resample('ME').last(),
         'FedFunds': fed_funds.resample('ME').last(),
         'SPY': spy_series.resample('ME').last(),
-        'Credit_Spread': credit_spread.resample('ME').last()
+        'Credit_Spread': ba_spread.resample('ME').last()
     }).dropna()
     
     return macro
@@ -48,27 +42,23 @@ def engineer_features(macro):
         - Yield Curve: 10Y - 2Y
         - CPI 6-month percentage change
         - Unemployment 3-month acceleration (difference)
-        - Target: forward 3-month SPY return and market regime label
-    Args:
-        macro (pd.DataFrame): DataFrame containing raw macro indicators and SPY price.
-    Returns:
-        pd.DataFrame: DataFrame with engineered features and target variable.
+        - Target: forward 6-month SPY return and market regime label
     """
     macro['Yield Curve'] = macro['10Y'] - macro['2Y']
     macro['CPI_6M_Change'] = macro['CPI'].pct_change(6)
     macro['Unemployment_3M_Accel'] = macro['Unemployment'].diff(3)
     
     # Target: forward 3-month SPY return
-    macro['SPY_3M_Return'] = macro['SPY'].pct_change(3).shift(-3)
-    macro['Market_Regime'] = macro['SPY_3M_Return'].apply(_label_regime)
+    macro['SPY_6M_Return'] = macro['SPY'].pct_change(6).shift(-6)
+    macro['Market_Regime'] = macro['SPY_6M_Return'].apply(label_regime)
     
     return macro
 
 
-def _label_regime(x):
-    """Label market regime based on 3-month return.
+def label_regime(x):
+    """Label market regime based on 6-month return.
     Args:
-        x (float): The forward 3-month return of SPY.
+        x (float): The forward 6-month return of SPY.
     Returns:
         str: 'Expansion' if return > 0, 'Contraction' if return <= 0, or NaN if input is NaN.
         """
@@ -78,23 +68,15 @@ def _label_regime(x):
 
 
 def prepare_training_data(macro):
-    """Prepare features and target for model training (best model features).
-    
-    Args:
-        macro (pd.DataFrame): DataFrame containing engineered features and target variable.
-    Returns:
-        tuple: (features DataFrame, target Series) ready for model training.
+    """Prepare features and target for model training, find best features. 
     """
     # Best feature set: Yield Curve, CPI_6M_Change, Credit_Spread
     features = macro[['Yield Curve', 'CPI_6M_Change', 'Credit_Spread']].dropna()
     target = macro['Market_Regime'].dropna()
     
-    # Align indices
     valid_idx = features.index.intersection(target.index)
     features = features.loc[valid_idx]
     target = target.loc[valid_idx]
-    
-    # Encode target
     target_encoded = target.map({'Expansion': 1, 'Contraction': 0})
     
     return features, target_encoded
@@ -102,32 +84,19 @@ def prepare_training_data(macro):
 
 def train_macro_classifier(features, target):
     '''Train a Random Forest classifier to predict market regime.
-    
-    Args:
-        features (pd.DataFrame): DataFrame containing feature columns.
-        target (pd.Series): Series containing encoded target variable.
-    Returns:
-        tuple: (trained model, X_train, X_test, y_train, y_test)
         '''
     split = int(len(features) * 0.8)
     X_train, X_test = features.iloc[:split], features.iloc[split:]
     y_train, y_test = target.iloc[:split], target.iloc[split:]
 
     model = RandomForestClassifier(
-        n_estimators=200, max_depth =4, 
-        class_weight='balanced', random_state=42
-    )
+        n_estimators=200, max_depth =4, random_state=42)
     model.fit(X_train, y_train)
     return model, X_train, X_test, y_train, y_test
 
 def evaluate_model(model, X_test, y_test):
     """Evaluate model performance with classification metrics.
-    
-    Args:
-        model: Trained classifier model.
-        X_test: Test features.
-        y_test: True labels for test set.
-        return_proba: If True, also return predicted probabilities.
+
     Returns:
         dict: A dictionary containing accuracy, precision, recall, AUC, confusion matrix, and optionally probabilities.
     """
@@ -151,13 +120,7 @@ def evaluate_model(model, X_test, y_test):
     }
 
 def get_feature_importance(model, features):
-    """Return feature importance scores.
-    
-    Args:
-        model: Trained classifier model with feature_importances_ attribute.
-        features: DataFrame containing the feature columns used for training.
-    Returns:
-        pd.DataFrame: A DataFrame with feature names and their corresponding importance scores.
+    """Gets feature importance scores.
     """
     importances = model.feature_importances_
     feature_names = features.columns
