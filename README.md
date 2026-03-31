@@ -1,3 +1,6 @@
+
+[streamlit-app-2026-03-31-10-42-01 (1).webm](https://github.com/user-attachments/assets/6af5d99e-289e-44da-8484-5f232ce9f1f8)
+
 Financial Indicator & Macro-Informed Portfolio Analysis
 A Research Project by Nikolai Szymkiewicz
 
@@ -41,3 +44,5 @@ Install dependencies: pip install -r requirements.txt
 Run the application: streamlit run app.py
 
 Note: Data is sourced from yfinance and FRED. This project is for educational and research purposes and does not constitute financial advice.
+
+
